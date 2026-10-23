@@ -277,10 +277,10 @@ a.btn { text-decoration: none; color: var(--fg); }
       <div class="drop" id="drop">
         <div class="src-btns">
           <button type="button" class="btn strava" id="strava-btn">Traer de Strava</button>
-          <label class="btn file-btn">Subir archivo GPX<input id="gpx" type="file" aria-label="Subir archivo GPX"></label>
+          <label class="btn file-btn">Subir ruta (GPX, FIT…)<input id="gpx" type="file" aria-label="Subir archivo de ruta"></label>
           <button type="button" class="btn" id="sample-route">Ruta de ejemplo</button>
         </div>
-        <div class="muted" style="margin-top:6px">También puedes arrastrar aquí un .gpx de Strava, Komoot, Garmin o Wikiloc.</div>
+        <div class="muted" style="margin-top:6px">Vale GPX, FIT, TCX, KML o GeoJSON (también comprimidos .gz), de Strava, Garmin, Komoot, Wahoo o Wikiloc. Puedes arrastrarlo aquí.</div>
         <div id="gpx-name" style="margin-top:4px;font-weight:600"></div>
       </div>
       <div class="field"><span class="label">Salida</span><input id="r-start" type="datetime-local"></div>
@@ -759,7 +759,7 @@ a.btn { text-decoration: none; color: var(--fg); }
     return { pts: pts, name: nm ? nm.textContent.trim() : "" };
   }
   function setRoute(pts, name) {
-    if (!pts || pts.length < 2) { $("route-status").textContent = "No encuentro puntos de recorrido en ese archivo. Exporta la ruta como GPX (track) y vuelve a probar."; return; }
+    if (!pts || pts.length < 2) { $("route-status").textContent = "No encuentro un recorrido con posiciones GPS en ese archivo. Si es una actividad de rodillo, no tiene recorrido real."; return; }
     // Reducir a 800 puntos como máximo
     var step = Math.max(1, Math.ceil(pts.length / 800)), red = [];
     for (var k = 0; k < pts.length; k += step) red.push(pts[k]);
@@ -769,13 +769,111 @@ a.btn { text-decoration: none; color: var(--fg); }
     $("gpx-name").textContent = RT.name + " · " + red.length + " puntos";
     analyseRoute();
   }
+  // TCX (Garmin Training Center)
+  function parseTcx(doc) {
+    var tps = doc.getElementsByTagName("Trackpoint"), pts = [];
+    for (var k = 0; k < tps.length; k++) {
+      var la = tps[k].getElementsByTagName("LatitudeDegrees")[0], lo = tps[k].getElementsByTagName("LongitudeDegrees")[0], al = tps[k].getElementsByTagName("AltitudeMeters")[0];
+      if (la && lo) pts.push([parseFloat(la.textContent), parseFloat(lo.textContent), al ? parseFloat(al.textContent) : null]);
+    }
+    var nm = doc.getElementsByTagName("Name")[0];
+    return { pts: pts, name: nm ? nm.textContent.trim() : "" };
+  }
+  // KML (Google Earth, Wikiloc…): LineString o gx:Track
+  function parseKml(doc) {
+    var pts = [], co = doc.getElementsByTagName("coordinates");
+    for (var k = 0; k < co.length; k++) {
+      if (co[k].parentNode && co[k].parentNode.nodeName.indexOf("Point") >= 0) continue;
+      co[k].textContent.trim().split(/\s+/).forEach(function (t) {
+        var v = t.split(",").map(parseFloat);
+        if (isFinite(v[0]) && isFinite(v[1])) pts.push([v[1], v[0], isFinite(v[2]) ? v[2] : null]);
+      });
+    }
+    if (!pts.length) {
+      var gx = doc.getElementsByTagName("gx:coord");
+      for (k = 0; k < gx.length; k++) { var v = gx[k].textContent.trim().split(/\s+/).map(parseFloat); if (isFinite(v[1])) pts.push([v[1], v[0], isFinite(v[2]) ? v[2] : null]); }
+    }
+    var nm = doc.getElementsByTagName("name")[0];
+    return { pts: pts, name: nm ? nm.textContent.trim() : "" };
+  }
+  function parseGeoJson(j) {
+    var pts = [];
+    function add(c) { c.forEach(function (p) { pts.push([p[1], p[0], p[2] != null ? p[2] : null]); }); }
+    function walk(g) {
+      if (!g) return;
+      if (g.type === "FeatureCollection") g.features.forEach(walk);
+      else if (g.type === "Feature") walk(g.geometry);
+      else if (g.type === "LineString") add(g.coordinates);
+      else if (g.type === "MultiLineString") g.coordinates.forEach(add);
+      else if (g.type === "GeometryCollection") g.geometries.forEach(walk);
+    }
+    walk(j);
+    return { pts: pts, name: (j.properties && j.properties.name) || (j.features && j.features[0] && j.features[0].properties && j.features[0].properties.name) || "" };
+  }
+  // FIT (Garmin, Wahoo, Strava "archivo original"): lee los mensajes "record" con posición y altitud
+  function parseFit(buf) {
+    var dv = new DataView(buf), hs = dv.getUint8(0), end = Math.min(buf.byteLength, hs + dv.getUint32(4, true)), pos = hs, defs = {}, pts = [], name = "";
+    while (pos < end) {
+      var h = dv.getUint8(pos++), local, def;
+      if (h & 0x80) { local = (h >> 5) & 3; def = defs[local]; }
+      else if (h & 0x40) {
+        local = h & 0x0f;
+        var le = dv.getUint8(pos + 1) === 0, gnum = dv.getUint16(pos + 2, le), nf = dv.getUint8(pos + 4), fields = [];
+        pos += 5;
+        for (var f = 0; f < nf; f++) { fields.push({ n: dv.getUint8(pos), s: dv.getUint8(pos + 1) }); pos += 3; }
+        var dev = 0;
+        if (h & 0x20) { var nd = dv.getUint8(pos++); for (f = 0; f < nd; f++) { dev += dv.getUint8(pos + 1); pos += 3; } }
+        defs[local] = { le: le, g: gnum, fields: fields, dev: dev };
+        continue;
+      } else { local = h & 0x0f; def = defs[local]; }
+      if (!def) break;
+      var rec = {};
+      def.fields.forEach(function (fl) {
+        if (def.g === 20 && fl.s === 4 && (fl.n === 0 || fl.n === 1)) rec[fl.n] = dv.getInt32(pos, def.le);
+        else if (def.g === 20 && fl.n === 2 && fl.s === 2) rec[2] = dv.getUint16(pos, def.le);
+        else if (def.g === 20 && fl.n === 78 && fl.s === 4) rec[78] = dv.getUint32(pos, def.le);
+        else if (def.g === 31 && fl.n === 5) { var t = ""; for (var q = 0; q < fl.s; q++) { var c = dv.getUint8(pos + q); if (!c) break; t += String.fromCharCode(c); } try { name = decodeURIComponent(escape(t)); } catch (e) { name = t; } }
+        pos += fl.s;
+      });
+      pos += def.dev;
+      if (def.g === 20 && rec[0] != null && rec[1] != null && rec[0] !== 0x7fffffff && rec[1] !== 0x7fffffff) {
+        var alt = rec[78] != null && rec[78] !== 0xffffffff ? rec[78] / 5 - 500 : rec[2] != null && rec[2] !== 0xffff ? rec[2] / 5 - 500 : null;
+        pts.push([rec[0] * 180 / 2147483648, rec[1] * 180 / 2147483648, alt]);
+      }
+    }
+    return { pts: pts, name: name };
+  }
+  function gunzip(buf) {
+    if (typeof DecompressionStream === "undefined") return Promise.reject(new Error("gz"));
+    return new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
+  }
+  function parseRoute(buf, fname) {
+    var b = new Uint8Array(buf);
+    if (b[0] === 0x1f && b[1] === 0x8b) return gunzip(buf).then(function (x) { return parseRoute(x, fname.replace(/\.gz$/i, "")); });
+    if (b.length > 12 && String.fromCharCode(b[8], b[9], b[10], b[11]) === ".FIT") return Promise.resolve(parseFit(buf));
+    var text = new TextDecoder("utf-8").decode(b).replace(/^﻿/, "").trim();
+    if (text[0] === "{") return Promise.resolve(parseGeoJson(JSON.parse(text)));
+    var doc = new DOMParser().parseFromString(text, "application/xml"), root = doc.documentElement ? doc.documentElement.nodeName.toLowerCase() : "";
+    if (root.indexOf("trainingcenterdatabase") >= 0) return Promise.resolve(parseTcx(doc));
+    if (root.indexOf("kml") >= 0) return Promise.resolve(parseKml(doc));
+    if (root.indexOf("gpx") >= 0) return Promise.resolve(parseGpx(text));
+    return Promise.reject(new Error("formato"));
+  }
   function readFile(f) {
     if (!f) return;
-    var rd = new FileReader();
-    rd.onload = function () { var r = parseGpx(String(rd.result)); setRoute(r.pts, r.name || f.name.replace(/\.gpx$/i, "")); };
-    rd.onerror = function () { $("route-status").textContent = "No he podido leer ese archivo. Prueba a descargarlo otra vez desde Strava o Komoot."; };
     $("route-status").textContent = "Leyendo «" + f.name + "»…";
-    rd.readAsText(f);
+    if (/\.kmz$/i.test(f.name)) { $("route-status").textContent = "Los .kmz son KML comprimidos en zip: descomprímelo y sube el .kml de dentro."; return; }
+    var rd = new FileReader();
+    rd.onload = function () {
+      parseRoute(rd.result, f.name).then(function (r) {
+        setRoute(r.pts, r.name || f.name.replace(/(\.gz)?$/i, "").replace(/\.(gpx|fit|tcx|kml|geojson|json)$/i, ""));
+      }).catch(function (e) {
+        $("route-status").textContent = e && e.message === "gz" ? "Tu navegador no puede abrir archivos .gz. Descomprímelo y súbelo otra vez."
+          : "No reconozco el formato de «" + f.name + "». Prueba con GPX, FIT, TCX, KML o GeoJSON.";
+      });
+    };
+    rd.onerror = function () { $("route-status").textContent = "No he podido leer ese archivo. Prueba a descargarlo otra vez desde Strava o Komoot."; };
+    rd.readAsArrayBuffer(f);
   }
 
   function naiveAdd(start, minutes) { return new Date(Date.parse(start + ":00Z") + minutes * 60000).toISOString().slice(0, 16); }
