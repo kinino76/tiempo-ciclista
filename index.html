@@ -166,6 +166,9 @@ a.btn { text-decoration: none; color: var(--fg); }
 #route-chart svg { min-width: 560px; }
 .route-out { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 18px; margin-top: 16px; }
 .map-box { position: relative; min-width: 0; }
+#route-out.no-route #hour-chips, #route-out.no-route .facts, #route-out.no-route #route-chart-box, #route-out.no-route .table-wrap, #route-out.no-route .map-box .legend, #route-out.no-route .map-box .src-btns { display: none; }
+#route-out.no-route .route-out { grid-template-columns: 1fr; }
+.area-note { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 500; background: var(--surface); color: var(--fg); border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; font-size: .85rem; white-space: nowrap; box-shadow: 0 2px 6px rgba(0,0,0,.2); }
 #lmap { height: 440px; border-radius: 8px; background: var(--bg); z-index: 0; }
 .wmk { background: none; border: 0; }
 .wmk-in { display: inline-grid; grid-template-columns: auto auto; align-items: center; column-gap: 5px; white-space: nowrap; background: var(--surface); color: var(--fg); border: 1.5px solid var(--wind); border-radius: 14px; padding: 3px 8px 3px 3px; font-family: var(--f-display); font-weight: 700; font-size: 14px; box-shadow: 0 2px 6px rgba(0,0,0,.25); transform: translate(-14px, -50%); }
@@ -297,6 +300,7 @@ a.btn { text-decoration: none; color: var(--fg); }
           <button type="button" class="btn strava" id="strava-btn">Traer de Strava</button>
           <label class="btn file-btn">Subir ruta (GPX, FIT…)<input id="gpx" type="file" aria-label="Subir archivo de ruta"></label>
           <button type="button" class="btn" id="sample-route">Ruta de ejemplo</button>
+          <button type="button" class="btn" id="area-btn" hidden>Ver solo el mapa</button>
         </div>
         <div class="muted" style="margin-top:6px">Vale GPX, FIT, TCX, KML o GeoJSON (también comprimidos .gz), de Strava, Garmin, Komoot, Wahoo o Wikiloc. Puedes arrastrarlo aquí.</div>
         <div id="gpx-name" style="margin-top:4px;font-weight:600"></div>
@@ -317,7 +321,7 @@ a.btn { text-decoration: none; color: var(--fg); }
         </div>
         <div class="facts" id="facts"></div>
       </div>
-      <div style="margin-top:16px">
+      <div style="margin-top:16px" id="route-chart-box">
         <div class="panel-head" style="margin-bottom:6px"><span class="label">Viento para ti a lo largo de la ruta (km)</span>
           <div class="legend"><span><i style="background:var(--bad)"></i>De cara</span><span><i style="background:var(--good)"></i>A favor</span><span><i style="background:var(--gust)"></i>Rachas</span></div></div>
         <div class="chart-wrap" id="route-chart"></div>
@@ -477,6 +481,8 @@ a.btn { text-decoration: none; color: var(--fg); }
   }
   function load(p) {
     S.place = p; store("tc-place", p);
+    if (AREA && LM) LM.setView([p.lat, p.lon], 11);
+    if (p.me && LM) markMe(p);
     $("place-line").textContent = p.name + (p.admin ? ", " + p.admin : "") + " · cargando…";
     renderChips();
     fetch(forecastUrl(p)).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
@@ -1136,15 +1142,8 @@ a.btn { text-decoration: none; color: var(--fg); }
   }
   function cssv(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
   function drawLeaflet(rows, R) {
-    $("lmap").hidden = false; $("map").style.display = "none"; document.querySelector(".zoom-btns").hidden = true;
-    if (!LM) {
-      LM = L.map("lmap", { zoomControl: true, attributionControl: true, zoomSnap: 0.25 });
-      LM.on("zoomend", thinMarkers);
-      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-      }).addTo(LM);
-      LG = L.layerGroup().addTo(LM);
-    }
+    ensureMap(); AREA = false; $("route-out").classList.remove("no-route"); WG.clearLayers(); $("area-btn").hidden = false;
+    if ($("area-note")) $("area-note").hidden = true;
     LG.clearLayers(); MKS = [];
     var col = { head: cssv("--bad"), tail: cssv("--good"), cross: cssv("--warn") }, cum = R.cum, li = 0, seg = [], segC = null;
     var all = RT.pts.map(function (p) { return [p[0], p[1]]; });
@@ -1173,8 +1172,65 @@ a.btn { text-decoration: none; color: var(--fg); }
   if (!window.claude) {
     var lcss = document.createElement("link"); lcss.rel = "stylesheet"; lcss.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"; document.head.appendChild(lcss);
     var ljs = document.createElement("script"); ljs.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
-    ljs.onload = function () { if (RT.pts) analyseRoute(); };
+    ljs.onload = function () { if (RT.pts) analyseRoute(); else showAreaMap(); };
     document.head.appendChild(ljs);
+  }
+
+  function ensureMap() {
+    $("lmap").hidden = false; $("map").style.display = "none"; document.querySelector(".zoom-btns").hidden = true;
+    if (LM) return;
+    LM = L.map("lmap", { zoomControl: true, attributionControl: true, zoomSnap: 0.25 });
+    LM.on("zoomend", thinMarkers);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }).addTo(LM);
+    LG = L.layerGroup().addTo(LM); WG = L.layerGroup().addTo(LM);
+    LM.on("moveend", function () { if (AREA) { clearTimeout(GT); GT = setTimeout(windGrid, 500); } });
+  }
+
+  /* Mapa de la zona sin ruta: viento actual repartido por el área visible */
+  var AREA = false, WG = null, GT = null, GSEQ = 0, ME = null;
+  function showAreaMap() {
+    if (!window.L) return;
+    AREA = true; RT.pts = null; LKEY = "";
+    $("route-out").hidden = false; $("route-out").classList.add("no-route"); $("area-btn").hidden = true;
+    $("gpx-name").textContent = "";
+    ensureMap(); LG.clearLayers(); MKS = [];
+    var c = S.place || PRESETS[0];
+    LM.invalidateSize(); LM.setView([c.lat, c.lon], 11);
+    if (!$("area-note")) { var n = document.createElement("div"); n.id = "area-note"; n.className = "area-note"; n.textContent = "Viento ahora en la zona · mueve el mapa"; $("lmap").parentNode.appendChild(n); }
+    $("area-note").hidden = false;
+    $("route-status").textContent = "Mueve y acerca el mapa para ver el viento de ahora en cualquier zona. Sube una ruta para verlo tramo a tramo a la hora en que pasas.";
+    windGrid();
+  }
+  function windGrid() {
+    if (!AREA || !LM) return;
+    var b = LM.getBounds(), sz = LM.getSize(), cols = sz.x < 600 ? 3 : sz.x < 900 ? 4 : 5, rows = sz.y < 400 ? 3 : 4, pts = [];
+    for (var r = 0; r < rows; r++) for (var q = 0; q < cols; q++) {
+      pts.push([b.getNorth() - (r + .5) * (b.getNorth() - b.getSouth()) / rows, b.getWest() + (q + .5) * (b.getEast() - b.getWest()) / cols]);
+    }
+    var seq = ++GSEQ;
+    fetch("https://api.open-meteo.com/v1/forecast?latitude=" + pts.map(function (p) { return p[0].toFixed(3); }).join(",") + "&longitude=" + pts.map(function (p) { return p[1].toFixed(3); }).join(",") +
+      "&current=temperature_2m,precipitation,wind_speed_10m,wind_gusts_10m,wind_direction_10m&timezone=auto&wind_speed_unit=kmh")
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (j) {
+        if (seq !== GSEQ || !AREA) return;
+        j = Array.isArray(j) ? j : [j];
+        WG.clearLayers();
+        j.forEach(function (d, k) {
+          var c = d.current; if (!c) return;
+          var html = '<div class="wmk-in"><svg class="dir" width="24" height="24" viewBox="-12 -12 24 24"><circle r="11" fill="' + cssv("--wind") + '"/><g transform="rotate(' + (c.wind_direction_10m + 180) + ')"><path d="M0 -8 L5 3 L1.2 1 L1.2 8 L-1.2 8 L-1.2 1 L-5 3 Z" fill="#fff"/></g></svg>' +
+            '<span class="l1"><span style="color:var(--wind)">' + r0(c.wind_speed_10m) + '</span><small>km/h</small><span class="gust">' + r0(c.wind_gusts_10m) + '</span></span><span class="l2">' + r0(c.temperature_2m) + "°" +
+            (c.precipitation >= 0.1 ? ' <span class="rain-c">' + ICON_R + " " + c.precipitation.toFixed(1).replace(".", ",") + " mm</span>" : "") + "</span></div>";
+          L.marker(pts[k], { icon: L.divIcon({ className: "wmk", html: html, iconSize: null }), title: "Viento del " + dir16(c.wind_direction_10m) + ", " + r0(c.wind_speed_10m) + " km/h, rachas " + r0(c.wind_gusts_10m) }).addTo(WG);
+        });
+      })
+      .catch(function () { if (seq === GSEQ) $("route-status").textContent = "No he podido cargar el viento de esta zona. Revisa la conexión."; });
+  }
+  function markMe(p) {
+    if (!window.L || !LM) return;
+    if (ME) ME.remove();
+    ME = L.circleMarker([p.lat, p.lon], { radius: 8, color: "#fff", weight: 3, fillColor: "#2b7de9", fillOpacity: 1 }).bindTooltip("Estás aquí").addTo(LM);
   }
 
   /* Zoom y desplazamiento del mapa */
@@ -1227,6 +1283,7 @@ a.btn { text-decoration: none; color: var(--fg); }
     $("gpx-name").textContent = RT.name + (RT.rev ? " · en sentido contrario" : "");
     analyseRoute();
   });
+  $("area-btn").addEventListener("click", function () { store("tc-route", null); showAreaMap(); });
   $("sample-route").addEventListener("click", function () { setRoute(densify(SAMPLE), "Ejemplo: El Pardo y Colmenar Viejo"); });
   $("route-form").addEventListener("submit", function (e) { e.preventDefault(); if (RT.pts) analyseRoute(); else $("route-status").textContent = "Primero sube un archivo GPX o prueba la ruta de ejemplo."; });
   $("r-start").value = defaultStart();
@@ -1379,7 +1436,9 @@ a.btn { text-decoration: none; color: var(--fg); }
     btn.textContent = "Buscando…";
     navigator.geolocation.getCurrentPosition(function (pos) {
       btn.textContent = "Mi ubicación";
-      load({ name: "Tu ubicación", admin: pos.coords.latitude.toFixed(2) + ", " + pos.coords.longitude.toFixed(2), lat: +pos.coords.latitude.toFixed(4), lon: +pos.coords.longitude.toFixed(4) });
+      var me = { name: "Tu ubicación", admin: pos.coords.latitude.toFixed(2) + ", " + pos.coords.longitude.toFixed(2), lat: +pos.coords.latitude.toFixed(4), lon: +pos.coords.longitude.toFixed(4), me: true };
+      if (!AREA && window.L && LM) showAreaMap();
+      load(me);
     }, function (err) {
       btn.textContent = "Mi ubicación";
       $("place-line").textContent = "El GPS no está permitido aquí (" + (err && err.code === 1 ? "permiso denegado" : "sin respuesta") + "). Pruebo con Strava…";
@@ -1420,7 +1479,8 @@ a.btn { text-decoration: none; color: var(--fg); }
   if (savedH) S.heading = DIR8.filter(function (x) { return x.k === savedH; })[0] || null;
   load(store("tc-place") || PRESETS[0]);
   var savedR = store("tc-route");
-  if (savedR && savedR.pts) setRoute(savedR.pts, savedR.name); else setRoute(densify(SAMPLE), "Ejemplo: El Pardo y Colmenar Viejo");
+  if (savedR && savedR.pts) setRoute(savedR.pts, savedR.name);
+  else if (window.claude) setRoute(densify(SAMPLE), "Ejemplo: El Pardo y Colmenar Viejo");
 })();
 </script>
 
